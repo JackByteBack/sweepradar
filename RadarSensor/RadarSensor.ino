@@ -3,6 +3,10 @@
  * Sweeps an HC-SR04 ultrasonic sensor on a servo and sends
  * "angle,distance." over USB serial at 9600 baud.
  *
+ * Also accepts commands from any connected client (web/app):
+ *   a<angle>  hold servo at angle (manual mode)
+ *   m         resume auto sweep
+ *
  * Wiring (Arduino Uno):
  *   HC-SR04 TRIG -> D10
  *   HC-SR04 ECHO -> D11
@@ -23,6 +27,11 @@ const int STEP_DEG   = 2;     // sweep resolution
 const int STEP_DELAY = 30;    // ms per step, lets the servo settle
 
 Servo scanner;
+
+bool autoMode = true;
+int currentAngle = 0;
+int sweepDir = STEP_DEG;
+int targetAngle = 90;
 
 long readDistanceCm() {
   digitalWrite(TRIG_PIN, LOW);
@@ -55,15 +64,34 @@ void setup() {
   delay(500);
 }
 
+// Incoming commands from any connected client (via server.py):
+//   "a<angle>\n" -> hold servo at angle (manual mode), e.g. "a90\n"
+//   "m\n"        -> resume auto sweep
+void readCommands() {
+  while (Serial.available()) {
+    char c = Serial.read();
+    if (c == 'a') {
+      autoMode = false;
+      targetAngle = constrain(Serial.parseInt(), 0, 180);
+      scanner.write(targetAngle);
+      sendReading(targetAngle, readDistanceCm());
+    } else if (c == 'm') {
+      autoMode = true;
+      currentAngle = targetAngle;
+    }
+  }
+}
+
 void loop() {
-  for (int a = 0; a <= 180; a += STEP_DEG) {
-    scanner.write(a);
-    delay(STEP_DELAY);
-    sendReading(a, readDistanceCm());
+  readCommands();
+  if (!autoMode) {          // hold position but keep listening for commands
+    delay(20);
+    return;
   }
-  for (int a = 180; a >= 0; a -= STEP_DEG) {
-    scanner.write(a);
-    delay(STEP_DELAY);
-    sendReading(a, readDistanceCm());
-  }
+
+  currentAngle += sweepDir;
+  if (currentAngle >= 180 || currentAngle <= 0) sweepDir = -sweepDir;
+  scanner.write(currentAngle);
+  delay(STEP_DELAY);
+  sendReading(currentAngle, readDistanceCm());
 }

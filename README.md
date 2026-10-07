@@ -17,11 +17,12 @@ rings, and a red blip on anything detected within 40 cm.
 6. [Software prerequisites](#6-software-prerequisites)
 7. [Step 1 — Flash the Arduino](#7-step-1--flash-the-arduino)
 8. [Step 2 — Run the Processing display](#8-step-2--run-the-processing-display)
-9. [Testing tips](#9-testing-tips)
-10. [Code walkthrough](#10-code-walkthrough)
-11. [Tuning](#11-tuning)
-12. [Troubleshooting](#12-troubleshooting)
-13. [Project files](#13-project-files)
+9. [Step 3 — Multi-device control (Mac, iPhone, Android)](#9-step-3--multi-device-control-mac-iphone-android)
+10. [Testing tips](#10-testing-tips)
+11. [Code walkthrough](#11-code-walkthrough)
+12. [Tuning](#12-tuning)
+13. [Troubleshooting](#13-troubleshooting)
+14. [Project files](#14-project-files)
 
 ---
 
@@ -110,16 +111,27 @@ until it sees the `.`, so partial reads never corrupt the display.
 ## 5. Serial protocol
 
 - **Baud rate:** 9600 (must match both sides — default in both sketches)
-- **Format:** `angle,distance.`
+- **Arduino → PC (telemetry):** `angle,distance.`
 
-Example stream in Serial Monitor:
+  Example stream in Serial Monitor:
 
-```
-0,180,2,175,4,170,...,90,25,92,26,...,180,40.
-```
+  ```
+  0,180.2,175.4,170.,...,90,25,92,26,...,180,40.
+  ```
 
-Values: `angle` = 0–180 (degrees), `distance` = 0–400 (cm, capped).
-Distance > 40 is treated as "out of range" by the display.
+  Values: `angle` = 0–180 (degrees), `distance` = 0–400 (cm, capped).
+  Distance > 40 is treated as "out of range" by the displays.
+
+- **PC → Arduino (commands, optional):**
+
+  | Command | Effect |
+  |---|---|
+  | `m` (e.g. `m\n`) | Resume automatic 0→180→0 sweep |
+  | `a<angle>` (e.g. `a90\n`) | Hold the servo at that angle (0–180) and take one reading |
+
+  The Processing display is receive-only (no commands). Commands come from the
+  web app in Step 3. The Arduino ignores the command stream gracefully if
+  nothing ever sends one — it just sweeps.
 
 ---
 
@@ -128,8 +140,9 @@ Distance > 40 is treated as "out of range" by the display.
 | Software | Version | Get it |
 |----------|---------|--------|
 | Arduino IDE | 1.8.19 (you have this) | https://www.arduino.cc/en/software |
-| Processing | 4.x (Windows) | https://processing.org/download |
+| Processing | 4.x (Mac/Windows/Linux) | https://processing.org/download |
 | Serial library | bundled with Processing | Sketch → Import Library → Manage Libraries → search "Serial" |
+| Python 3 + pyserial | only for Step 3 (web/multi-device) | https://python.org then `pip install pyserial` |
 
 If Processing flags `Serial` as unrecognized: open **Sketch → Import Library →
 Manage Libraries**, search `Serial`, install, restart Processing.
@@ -197,7 +210,73 @@ Connected to: COM5
 
 ---
 
-## 9. Testing tips
+## 9. Step 3 — Multi-device control (Mac, iPhone, Android)
+
+The Processing display in Step 2 is a desktop app. To let **any device — a Mac,
+an iPhone, an Android phone, a tablet, a second PC — view and control** the
+radar over WiFi, run the bundled web server on whichever computer is plugged
+into the Arduino:
+
+### One-time setup on the host computer (Mac / Windows / Linux)
+
+1. Install Python 3 from https://python.org (skip — Macs usually have it).
+2. Install the one dependency:
+
+   ```bash
+   pip install pyserial
+   ```
+
+   (Mac/Linux: `pip3 install pyserial`)
+
+### Run the server
+
+```bash
+cd web
+python3 server.py                    # auto-detects the Arduino
+python3 server.py /dev/ttyUSB0       # or name the port explicitly
+python3 server.py COM3               # Windows
+```
+
+Output:
+
+```
+Serial connected: /dev/tty.usbmodem14101
+
+  SweepRadar running:  http://192.168.1.24:8080
+  Open that URL from any device on the same WiFi network.
+```
+
+### Connect any device
+
+Open that URL in a browser — same WiFi network, no app install:
+
+| Device | How |
+|---|---|
+| **Mac** | Safari/Chrome → `http://192.168.1.24:8080` (or run the Processing app directly) |
+| **iPhone** | Safari → same URL |
+| **Android** | Chrome → same URL |
+| Any other PC | Any browser → same URL |
+
+### What each device can do
+
+- **View** — live radar: sweep line, distance rings, red blip, angle/distance/
+  status readout, refreshed every 150 ms. Multiple devices can watch at once.
+- **Control** —
+  - **[Auto sweep]** button → sends `m`, servo resumes its 0→180→0 sweep.
+  - **Angle slider** → sends `a<deg>`, the servo stops and holds that exact
+    angle while it takes a reading. Drag it to aim the sensor anywhere.
+
+If the IP printed by the server is wrong or the devices can't reach it:
+firewall allowing port 8080, and phone/host on the same network (guest WiFi
+isolation blocks this).
+
+> **Upgrade path:** swap the Uno for an ESP32 and move this same server code
+> onto the chip — the radar then broadcasts its own WiFi with no PC attached.
+> Not needed yet, but the serial protocol above stays identical.
+
+---
+
+## 10. Testing tips
 
 1. **Open the Serial Monitor first** to verify the Arduino sends
    `angle,distance.` at 9600 baud. If the format is wrong there, Processing
@@ -219,12 +298,18 @@ Connected to: COM5
 
    Change `MAX_RANGE_CM` (`.pde`) **and** `MAX_CM` (`.ino`) together so both
    sides agree on the range.
+5. **Web app not updating?** — confirm `server.py` prints `Serial connected:`,
+   and that the Arduino's Serial Monitor is closed (only one app can hold the
+   port).
+6. **Phone can't reach the page?** — host and phone must be on the same WiFi
+   (guest networks often block device-to-device traffic), and port 8080 must
+   be allowed through the host firewall.
 
 **Other keys:** none — `R` and `S` are the only shortcuts.
 
 ---
 
-## 10. Code walkthrough
+## 11. Code walkthrough
 
 ### Arduino — `RadarSensor.ino`
 
@@ -235,7 +320,8 @@ Connected to: COM5
 | `readDistanceCm()` | Fires a 10 µs trigger pulse, measures the echo with `pulseIn(..., 25000)` (25 ms timeout ≈ 4 m). No echo → reports out-of-range instead of hanging |
 | `sendReading(angle, cm)` | Prints `angle,distance.` — the exact packet format |
 | `setup()` | 9600 baud, attaches servo to D9, parks it at 90° for 500 ms |
-| `loop()` | Sweeps 0→180→0 in 2° steps, 30 ms settle delay per step, sends one packet per step |
+| `readCommands()` | Reads incoming command bytes: `a<deg>` holds the servo at an angle (manual mode), `m` resumes auto sweep. Idle if nothing sends commands |
+| `loop()` | Auto mode: sweeps 0→180→0 in 2° steps, 30 ms settle delay, sends one packet per step. Manual mode: holds position, keeps listening for commands |
 
 ### Processing — `RadarDisplay.pde`
 
@@ -250,9 +336,20 @@ Connected to: COM5
 | `drawText()` | Status bar: distance markers, project name, angle, distance, in/out-of-range status, yellow `Waiting for data...` until the first packet |
 | `keyPressed()` | `R` simulates a detection, `S` dumps current values to console |
 
+### Web server — `web/server.py`
+
+| Block | What it does |
+|---|---|
+| `find_port()` | Auto-detects the Arduino by USB vendor ID (0x2341), falls back to the first port; `python3 server.py <port>` to override |
+| `serial_reader()` (thread) | Continuously parses `angle,distance.` packets into the `latest` dict — keeps running while requests are served |
+| `GET /` | Serves the embedded radar UI (one HTML file, canvas drawing, 150 ms polling) |
+| `GET /data` | Returns `latest` as JSON: `{"angle", "distance", "ts"}` |
+| `POST /cmd` | Forwards control commands to the Arduino: `auto` → `m`, `angle:<n>` → `a<n>` (clamped 0–180) |
+| `lan_ip()` / `__main__` | Detects the machine's LAN IP and prints the URL to open from other devices |
+
 ---
 
-## 11. Tuning
+## 12. Tuning
 
 | Want to… | Change |
 |---|---|
@@ -263,10 +360,12 @@ Connected to: COM5
 | Different baud rate | `Serial.begin(...)` in `.ino` **and** `new Serial(this, portName, ...)` in `.pde` |
 | Different window size | `size(w, h)` in `.pde` — all drawing scales off `width`/`height` |
 | Different pins | The `const int` block at the top of `.ino` |
+| Different web port | `HTTP_PORT` in `server.py` (default 8080) |
+| Faster/slower UI refresh | `setTimeout(tick, 150)` in `server.py` HTML (milliseconds) |
 
 ---
 
-## 12. Troubleshooting
+## 13. Troubleshooting
 
 | Symptom | Cause | Fix |
 |---|---|---|
@@ -279,18 +378,24 @@ Connected to: COM5
 | Red dot jitters wildly | Electrical noise on servo supply | Separate servo power, common ground, decoupling cap across servo VCC/GND |
 | Wrong COM port listed | Multiple serial devices | Unplug Uno, rerun (list shrinks), replug to identify it |
 | `Serial` library not found in Processing | Library missing | Sketch → Import Library → Manage Libraries → install "Serial" |
+| `ModuleNotFoundError: No module named 'serial'` | pyserial missing | `pip install pyserial` (Mac/Linux: `pip3`) |
+| `server.py` says `Permission denied` on port | Port busy | Serial Monitor open, or another `server.py` running — close it |
+| Phone shows "Waiting for data..." but host works | Network isolation / stale timestamp | Same WiFi (not guest), firewall allows 8080, restart `server.py` |
 
 ---
 
-## 13. Project files
+## 14. Project files
 
 ```
 sweepradar/
 ├── README.md                      ← this file
 ├── RadarSensor/
 │   └── RadarSensor.ino            ← upload to Arduino Uno (Arduino IDE)
-└── RadarDisplay/
-    └── RadarDisplay.pde           ← run on PC (Processing IDE)
+├── RadarDisplay/
+│   └── RadarDisplay.pde           ← desktop radar UI (Processing IDE, Mac/Win)
+└── web/
+    └── server.py                  ← web radar + remote control for any device
+                                      (Mac, iPhone, Android browser)
 ```
 
 **License:** free to use, modify, and share. Change the name in `drawText()`
